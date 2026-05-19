@@ -13,10 +13,14 @@ variable "vpc_id" {
   type        = string
 }
 
+variable "environment" {
+  description = "Environment label value."
+  type        = string
+}
+
 variable "application_namespace" {
   description = "Namespace where the Petclinic application is deployed."
   type        = string
-  default     = "petclinic-dev"
 }
 
 variable "oidc_provider_arn" {
@@ -48,31 +52,31 @@ variable "aws_load_balancer_controller_role_arn" {
 variable "external_secrets_chart_version" {
   description = "Optional pinned External Secrets Helm chart version."
   type        = string
-  default     = null
+  default     = "2.5.0"
 }
 
 variable "aws_load_balancer_controller_chart_version" {
   description = "Optional pinned AWS Load Balancer Controller Helm chart version."
   type        = string
-  default     = null
+  default     = "3.3.0"
 }
 
 variable "external_dns_chart_version" {
   description = "Optional pinned ExternalDNS Helm chart version."
   type        = string
-  default     = null
+  default     = "1.21.1"
 }
 
 variable "kube_prometheus_stack_chart_version" {
-  description = "Optional pinned kube-prometheus-stack Helm chart version."
+  description = "Pinned kube-prometheus-stack Helm chart version."
   type        = string
-  default     = null
+  default     = "85.1.2"
 }
 
 variable "argocd_chart_version" {
   description = "Optional pinned Argo CD Helm chart version."
   type        = string
-  default     = null
+  default     = "9.5.14"
 }
 
 variable "grafana_service_type" {
@@ -87,7 +91,7 @@ variable "grafana_service_type" {
 }
 
 variable "enable_platform_ingress" {
-  description = "Whether to expose ArgoCD, Grafana, and Prometheus through ALB ingresses."
+  description = "Whether to expose ArgoCD, Grafana, Prometheus, and Zipkin through ALB ingresses."
   type        = bool
   default     = false
 }
@@ -116,8 +120,20 @@ variable "prometheus_hostname" {
   default     = ""
 }
 
+variable "zipkin_hostname" {
+  description = "External hostname for the Zipkin UI."
+  type        = string
+  default     = ""
+}
+
 variable "platform_certificate_arn" {
   description = "ACM certificate ARN used by ArgoCD, Grafana, and Prometheus ALB ingresses."
+  type        = string
+  default     = ""
+}
+
+variable "zipkin_certificate_arn" {
+  description = "ACM certificate ARN used by the Zipkin ALB ingress. Defaults to the platform certificate when empty."
   type        = string
   default     = ""
 }

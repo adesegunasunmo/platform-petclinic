@@ -7,8 +7,8 @@ platform ingress.
 
 - Looks up an existing public Route 53 hosted zone.
 - Creates an ACM certificate for the application hostname.
-- Adds subject alternative names for additional hostnames such as Argo CD and
-  Grafana.
+- Adds subject alternative names for additional hostnames such as Argo CD,
+  Grafana, Prometheus, and any public service dashboards.
 - Creates Route 53 DNS validation records.
 - Waits for ACM certificate validation.
 
@@ -26,7 +26,10 @@ Additional hostnames are created from:
 <additional_subdomain>.<root_domain_name>
 ```
 
-The dev root passes the Argo CD and Grafana subdomains as additional names.
+The dev root passes Argo CD, Grafana, Prometheus, `eureka`, and `discovery` as
+additional names. The prod root passes Argo CD, Grafana, and Prometheus. Zipkin
+uses a separate instance of this module so exposing it does not replace the
+shared platform certificate.
 
 ## Inputs
 
@@ -36,6 +39,7 @@ Important active inputs:
 - `root_domain_name`
 - `app_subdomain`
 - `additional_subdomains`
+- `certificate_name`
 - `aws_region`
 - `tags`
 
@@ -57,5 +61,6 @@ current resources do not create Kubernetes ingress objects here.
 ## Relationship To Add-Ons
 
 This module creates the certificate. The `addons` module uses the certificate
-ARN to expose Argo CD and Grafana through ALB ingresses. The service Helm chart
-can expose `api-gateway` through an ALB ingress when ingress values are enabled.
+ARN to expose Argo CD, Grafana, and Prometheus through ALB ingresses. A separate
+instance provides the Zipkin certificate. The service Helm chart can expose
+application services through ALB ingresses when ingress values are enabled.
