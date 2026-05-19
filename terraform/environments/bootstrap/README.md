@@ -8,6 +8,9 @@ platform environment can be managed safely.
 - S3 bucket for Terraform remote state.
 - Versioning, AES256 server-side encryption, public access blocking, and bucket
   ownership controls for the state bucket.
+- A state-bucket guardrail policy that denies non-break-glass principals from
+  deleting the bucket, deleting state objects or versions, deleting the bucket
+  policy, or adding lifecycle cleanup rules.
 - GitHub Actions OIDC provider for `token.actions.githubusercontent.com`.
 - `petclinic-github-actions-role`.
 - IAM policies that let GitHub Actions:
@@ -22,8 +25,18 @@ Do not destroy this root during normal environment rebuilds. It uses
 `prevent_destroy` on the state bucket and key GitHub OIDC resources because
 losing them can break Terraform state access and CI/CD authentication.
 
+The state bucket also has an explicit bucket policy guardrail. By default, only
+the AWS account root principal is exempt as a break-glass path. Add tightly
+controlled emergency principals with
+`state_bucket_guardrail_exempt_principal_arns` only when needed.
+
 Destroy only disposable environment roots such as `terraform/environments/dev`
 when rebuilding the platform.
+
+If the backend bucket is missing, recreate it before running more platform
+applies or destroys. When Terraform has written an `errored.tfstate` recovery
+file in an environment root, push that file back to the restored backend before
+running another apply.
 
 ## Inputs
 
@@ -37,6 +50,8 @@ Important variables:
 - `platform_state_key_prefix`, `prod_state_key_prefix`,
   `bootstrap_state_key_prefix`: state prefixes permitted by the IAM policy.
 - `terraform_state_kms_key_arn`: optional KMS key for encrypted state access.
+- `state_bucket_guardrail_exempt_principal_arns`: optional break-glass
+  principals allowed to bypass state bucket deletion denies.
 
 ## Outputs
 

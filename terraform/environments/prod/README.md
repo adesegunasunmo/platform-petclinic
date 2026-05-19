@@ -57,6 +57,9 @@ Create `terraform/environments/prod/terraform.tfvars` for production overrides
 when needed. `terraform.tfvars` is no longer ignored by Git, so commit only
 sanitized values and keep credentials out of the file.
 
+Include the stable IAM roles that should administer the cluster in
+`eks_admin_role_arns`; Terraform will manage EKS access entries for them.
+
 ```bash
 terraform -chdir=terraform/environments/prod init
 terraform -chdir=terraform/environments/prod fmt -check -recursive
@@ -78,6 +81,8 @@ terraform -chdir=terraform/environments/prod apply -var-file=terraform.tfvars
 - `argocd_domain_name`
 - `grafana_domain_name`
 - `prometheus_domain_name`
+- `zipkin_domain_name`
+- `zipkin_acm_certificate_arn`
 
 ## Post-Apply Checks
 
@@ -96,4 +101,5 @@ https://petclinic-prod.phoniex.site
 https://argocd-prod.phoniex.site
 https://grafana-prod.phoniex.site
 https://prometheus-prod.phoniex.site
+https://zipkin-prod.phoniex.site
 ```
