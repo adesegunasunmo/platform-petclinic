@@ -3,8 +3,11 @@ locals {
   tracing_namespace    = "tracing"
 
   instrumented_services = [
+    "admin-server",
     "api-gateway",
+    "config-server",
     "customers-service",
+    "discovery-server",
     "visits-service",
     "vets-service",
     "genai-service",
@@ -132,13 +135,128 @@ locals {
       }
     ]
   }
+
+  petclinic_alert_rules_manifest = {
+    apiVersion = "monitoring.coreos.com/v1"
+    kind       = "PrometheusRule"
+
+    metadata = {
+      name      = "petclinic-alert-rules"
+      namespace = local.monitoring_namespace
+      labels = merge(local.observability_labels, {
+        "app.kubernetes.io/name" = "petclinic-alert-rules"
+        release                  = "monitoring"
+      })
+    }
+
+    spec = {
+      groups = [
+        {
+          name = "petclinic.rules"
+          rules = [
+            {
+              alert = "PetclinicHighErrorRate"
+              expr  = <<-EOT
+                (
+                  sum by (pod) (rate(http_server_requests_seconds_count{namespace="${local.application_namespace}",status=~"5.."}[5m]))
+                  /
+                  sum by (pod) (rate(http_server_requests_seconds_count{namespace="${local.application_namespace}"}[5m]))
+                ) > 0.05
+                and on (pod)
+                sum by (pod) (rate(http_server_requests_seconds_count{namespace="${local.application_namespace}"}[5m])) > 0.1
+              EOT
+              for   = "5m"
+              labels = {
+                severity = "warning"
+                team     = "petclinic"
+              }
+              annotations = {
+                summary     = "High HTTP 5xx error rate"
+                description = "{{ $labels.pod }} has more than 5% HTTP 5xx responses for 5 minutes."
+              }
+            },
+            {
+              alert = "PetclinicPodRestartLoop"
+              expr  = "sum by (namespace, pod, container) (increase(kube_pod_container_status_restarts_total{namespace=\"${local.application_namespace}\"}[15m])) > 5"
+              labels = {
+                severity = "warning"
+                team     = "petclinic"
+              }
+              annotations = {
+                summary     = "Pod restart loop"
+                description = "{{ $labels.pod }} restarted more than 5 times in 15 minutes."
+              }
+            },
+            {
+              alert = "PetclinicHighMemoryUsage"
+              expr  = <<-EOT
+                (
+                  sum by (pod, container) (container_memory_working_set_bytes{namespace="${local.application_namespace}",container!="",image!=""})
+                  /
+                  sum by (pod, container) (kube_pod_container_resource_limits{namespace="${local.application_namespace}",resource="memory",unit="byte"} > 0)
+                ) > 0.8
+              EOT
+              for   = "5m"
+              labels = {
+                severity = "warning"
+                team     = "petclinic"
+              }
+              annotations = {
+                summary     = "High pod memory usage"
+                description = "{{ $labels.pod }}/{{ $labels.container }} is using more than 80% of its memory limit."
+              }
+            },
+            {
+              alert = "PetclinicServiceDown"
+              expr  = <<-EOT
+                kube_deployment_spec_replicas{namespace="${local.application_namespace}",deployment=~"(${join("|", local.instrumented_services)})"} > 0
+                unless on (namespace, deployment)
+                label_replace(
+                  max_over_time(up{namespace="${local.application_namespace}",pod=~"(${join("|", local.instrumented_services)})-.*"}[2m]) == 1,
+                  "deployment",
+                  "$1",
+                  "pod",
+                  "(.+)-[a-z0-9]+-[a-z0-9]+"
+                )
+              EOT
+              for   = "2m"
+              labels = {
+                severity = "critical"
+                team     = "petclinic"
+              }
+              annotations = {
+                summary     = "Service metrics target is down"
+                description = "{{ $labels.deployment }} has no successful Prometheus scrape for 2 minutes."
+              }
+            },
+            {
+              alert = "PetclinicSlowP99ResponseTime"
+              expr  = <<-EOT
+                histogram_quantile(
+                  0.99,
+                  sum by (le, pod) (rate(http_server_requests_seconds_bucket{namespace="${local.application_namespace}"}[5m]))
+                ) > 2
+              EOT
+              for   = "5m"
+              labels = {
+                severity = "warning"
+                team     = "petclinic"
+              }
+              annotations = {
+                summary     = "Slow P99 response time"
+                description = "{{ $labels.pod }} has P99 latency above 2s for 5 minutes."
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
 }
 
 resource "helm_release" "monitoring" {
   name             = "monitoring"
-  repository       = "https://prometheus-community.github.io/helm-charts"
-  chart            = "kube-prometheus-stack"
-  version          = var.kube_prometheus_stack_chart_version
+  chart            = "https://github.com/prometheus-community/helm-charts/releases/download/kube-prometheus-stack-${var.kube_prometheus_stack_chart_version}/kube-prometheus-stack-${var.kube_prometheus_stack_chart_version}.tgz"
   namespace        = local.monitoring_namespace
   create_namespace = true
   wait             = true
@@ -309,6 +427,10 @@ resource "kubernetes_ingress_v1" "grafana" {
 
   wait_for_load_balancer = true
 
+  timeouts {
+    delete = "45m"
+  }
+
   depends_on = [
     helm_release.aws_load_balancer_controller,
     kubernetes_service_v1.grafana_alias,
@@ -355,6 +477,10 @@ resource "kubernetes_ingress_v1" "prometheus" {
   }
 
   wait_for_load_balancer = true
+
+  timeouts {
+    delete = "45m"
+  }
 
   depends_on = [
     helm_release.aws_load_balancer_controller,
@@ -1007,107 +1133,86 @@ resource "kubernetes_service_v1" "zipkin" {
   depends_on = [kubernetes_deployment_v1.zipkin]
 }
 
-resource "kubernetes_manifest" "petclinic_alert_rules" {
-  manifest = {
-    apiVersion = "monitoring.coreos.com/v1"
-    kind       = "PrometheusRule"
+resource "kubernetes_ingress_v1" "zipkin" {
+  count = var.enable_platform_ingress ? 1 : 0
 
-    metadata = {
-      name      = "petclinic-alert-rules"
-      namespace = local.monitoring_namespace
-      labels = merge(local.observability_labels, {
-        "app.kubernetes.io/name" = "petclinic-alert-rules"
-        release                  = "monitoring"
-      })
-    }
+  metadata {
+    name      = "zipkin"
+    namespace = local.tracing_namespace
 
-    spec = {
-      groups = [
-        {
-          name = "petclinic.rules"
-          rules = [
-            {
-              alert = "PetclinicHighErrorRate"
-              expr  = <<-EOT
-                (
-                  sum by (pod) (rate(http_server_requests_seconds_count{namespace="${local.application_namespace}",status=~"5.."}[5m]))
-                  /
-                  sum by (pod) (rate(http_server_requests_seconds_count{namespace="${local.application_namespace}"}[5m]))
-                ) > 0.05
-              EOT
-              for   = "5m"
-              labels = {
-                severity = "warning"
-              }
-              annotations = {
-                summary     = "High HTTP 5xx error rate"
-                description = "{{ $labels.pod }} has an HTTP 5xx error rate above 0.05 for 5 minutes."
-              }
-            },
-            {
-              alert = "PetclinicPodRestartLoop"
-              expr  = "increase(kube_pod_container_status_restarts_total{namespace=\"${local.application_namespace}\"}[15m]) > 5"
-              for   = "5m"
-              labels = {
-                severity = "warning"
-              }
-              annotations = {
-                summary     = "Pod restart loop"
-                description = "{{ $labels.pod }} restarted more than 5 times in 15 minutes."
-              }
-            },
-            {
-              alert = "PetclinicHighMemoryUsage"
-              expr  = <<-EOT
-                (
-                  sum by (pod, container) (container_memory_working_set_bytes{namespace="${local.application_namespace}",container!="",image!=""})
-                  /
-                  sum by (pod, container) (kube_pod_container_resource_limits{namespace="${local.application_namespace}",resource="memory",unit="byte"} > 0)
-                ) > 0.8
-              EOT
-              for   = "5m"
-              labels = {
-                severity = "warning"
-              }
-              annotations = {
-                summary     = "High pod memory usage"
-                description = "{{ $labels.pod }} is using more than 0.8 of its memory limit."
-              }
-            },
-            {
-              alert = "PetclinicServiceDown"
-              expr  = "up{namespace=\"${local.application_namespace}\",pod=~\"(${join("|", local.instrumented_services)})-.*\"} == 0"
-              for   = "2m"
-              labels = {
-                severity = "critical"
-              }
-              annotations = {
-                summary     = "Service metrics target is down"
-                description = "{{ $labels.pod }} has not exposed scrapeable metrics for 2 minutes."
-              }
-            },
-            {
-              alert = "PetclinicSlowP99ResponseTime"
-              expr  = <<-EOT
-                histogram_quantile(
-                  0.99,
-                  sum by (le, pod) (rate(http_server_requests_seconds_bucket{namespace="${local.application_namespace}"}[5m]))
-                ) > 2
-              EOT
-              for   = "5m"
-              labels = {
-                severity = "warning"
-              }
-              annotations = {
-                summary     = "Slow P99 response time"
-                description = "{{ $labels.pod }} has P99 latency above 2s for 5 minutes."
+    labels = merge(local.observability_labels, {
+      "app.kubernetes.io/name" = "zipkin"
+    })
+
+    annotations = merge(local.platform_ingress_annotations, {
+      "alb.ingress.kubernetes.io/certificate-arn"  = coalesce(var.zipkin_certificate_arn, var.platform_certificate_arn)
+      "alb.ingress.kubernetes.io/healthcheck-path" = "/health"
+      "alb.ingress.kubernetes.io/success-codes"    = "200-399"
+    })
+  }
+
+  spec {
+    ingress_class_name = "alb"
+
+    rule {
+      host = var.zipkin_hostname
+
+      http {
+        path {
+          path      = "/"
+          path_type = "Prefix"
+
+          backend {
+            service {
+              name = kubernetes_service_v1.zipkin.metadata[0].name
+
+              port {
+                number = 9411
               }
             }
-          ]
+          }
         }
-      ]
+      }
     }
   }
+
+  wait_for_load_balancer = true
+
+  timeouts {
+    delete = "45m"
+  }
+
+  depends_on = [
+    helm_release.aws_load_balancer_controller,
+    kubernetes_service_v1.zipkin,
+  ]
+}
+
+resource "aws_route53_record" "zipkin" {
+  count = var.enable_platform_ingress ? 1 : 0
+
+  allow_overwrite = true
+  zone_id         = data.aws_route53_zone.platform[0].zone_id
+  name            = var.zipkin_hostname
+  type            = "CNAME"
+  ttl             = 60
+  records         = [kubernetes_ingress_v1.zipkin[0].status[0].load_balancer[0].ingress[0].hostname]
+}
+
+resource "helm_release" "monitoring_rules" {
+  name      = "petclinic-monitoring-rules"
+  chart     = local.raw_manifests_chart
+  namespace = local.monitoring_namespace
+  wait      = true
+  timeout   = 300
+
+  values = [
+    yamlencode({
+      objects = [
+        local.petclinic_alert_rules_manifest
+      ]
+    })
+  ]
 
   depends_on = [helm_release.monitoring]
 }

@@ -5,6 +5,7 @@ locals {
   application_namespace            = var.application_namespace
   load_balancer_namespace          = "kube-system"
   load_balancer_service_account    = "aws-load-balancer-controller"
+  raw_manifests_chart              = "${path.module}/charts/raw-manifests"
 
   platform_ingress_annotations = {
     "alb.ingress.kubernetes.io/scheme"             = "internet-facing"
@@ -14,6 +15,32 @@ locals {
     "alb.ingress.kubernetes.io/certificate-arn"    = var.platform_certificate_arn
     "alb.ingress.kubernetes.io/group.name"         = var.platform_alb_group_name
     "alb.ingress.kubernetes.io/load-balancer-name" = var.platform_alb_name
+  }
+
+  cluster_secret_store_manifest = {
+    apiVersion = "external-secrets.io/v1"
+    kind       = "ClusterSecretStore"
+
+    metadata = {
+      name = "aws-secrets-manager"
+    }
+
+    spec = {
+      provider = {
+        aws = {
+          service = "SecretsManager"
+          region  = var.aws_region
+          auth = {
+            jwt = {
+              serviceAccountRef = {
+                name      = local.external_secrets_service_account
+                namespace = local.external_secrets_namespace
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }
 
@@ -110,9 +137,13 @@ resource "kubernetes_namespace_v1" "application" {
     labels = {
       "app.kubernetes.io/name"    = "petclinic"
       "app.kubernetes.io/part-of" = "petclinic"
-      "petclinic.io/environment"  = "dev"
+      "petclinic.io/environment"  = var.environment
     }
   }
+
+  depends_on = [
+    helm_release.external_secrets
+  ]
 }
 
 resource "helm_release" "external_secrets" {
@@ -122,6 +153,8 @@ resource "helm_release" "external_secrets" {
   version          = var.external_secrets_chart_version
   namespace        = local.external_secrets_namespace
   create_namespace = true
+  wait             = true
+  timeout          = 900
 
   values = [
     yamlencode({
@@ -135,34 +168,26 @@ resource "helm_release" "external_secrets" {
       }
     })
   ]
+
+  depends_on = [
+    helm_release.aws_load_balancer_controller
+  ]
 }
 
-resource "kubernetes_manifest" "cluster_secret_store" {
-  manifest = {
-    apiVersion = "external-secrets.io/v1"
-    kind       = "ClusterSecretStore"
+resource "helm_release" "external_secrets_manifests" {
+  name      = "petclinic-external-secrets-manifests"
+  chart     = local.raw_manifests_chart
+  namespace = local.external_secrets_namespace
+  wait      = true
+  timeout   = 300
 
-    metadata = {
-      name = "aws-secrets-manager"
-    }
-
-    spec = {
-      provider = {
-        aws = {
-          service = "SecretsManager"
-          region  = var.aws_region
-          auth = {
-            jwt = {
-              serviceAccountRef = {
-                name      = local.external_secrets_service_account
-                namespace = local.external_secrets_namespace
-              }
-            }
-          }
-        }
-      }
-    }
-  }
+  values = [
+    yamlencode({
+      objects = [
+        local.cluster_secret_store_manifest
+      ]
+    })
+  ]
 
   depends_on = [
     helm_release.external_secrets
@@ -175,12 +200,17 @@ resource "helm_release" "aws_load_balancer_controller" {
   chart      = "aws-load-balancer-controller"
   version    = var.aws_load_balancer_controller_chart_version
   namespace  = local.load_balancer_namespace
+  wait       = true
+  timeout    = 900
 
   values = [
     yamlencode({
       clusterName = var.cluster_name
       region      = var.aws_region
       vpcId       = var.vpc_id
+      # The service mutator webhook is cluster-wide and can block unrelated
+      # Helm installs while the controller webhook endpoints are starting.
+      enableServiceMutatorWebhook = false
       serviceAccount = {
         create = true
         name   = local.load_balancer_service_account
@@ -200,6 +230,8 @@ resource "helm_release" "external_dns" {
   chart      = "external-dns"
   version    = var.external_dns_chart_version
   namespace  = local.load_balancer_namespace
+  wait       = true
+  timeout    = 900
 
   values = [
     yamlencode({
@@ -244,6 +276,8 @@ resource "helm_release" "argocd" {
   version          = var.argocd_chart_version
   namespace        = "argocd"
   create_namespace = true
+  wait             = true
+  timeout          = 1800
 
   values = [
     yamlencode({
@@ -254,7 +288,8 @@ resource "helm_release" "argocd" {
       }
       redis = {
         serviceAccount = {
-          name = "argocd-redis"
+          create = true
+          name   = "argocd-redis"
         }
       }
     })
@@ -302,6 +337,10 @@ resource "kubernetes_ingress_v1" "argocd" {
   }
 
   wait_for_load_balancer = true
+
+  timeouts {
+    delete = "45m"
+  }
 
   depends_on = [
     helm_release.argocd,
